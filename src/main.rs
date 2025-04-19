@@ -1,10 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
-};
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::str::FromStr;
 
 #[derive(Serialize, Debug)]
 struct ResponseStatus {
@@ -30,6 +29,7 @@ struct ResponseBody {
 struct Response {
     status: ResponseStatus,
     headers: ResponseHeaders,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<ResponseBody>,
 }
@@ -37,13 +37,30 @@ struct Response {
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(rename_all = "UPPERCASE")]
 enum HTTPMethod {
-    POST,
     GET,
+    POST,
     DELETE,
     HEAD,
     PUT,
     PATCH,
     OPTIONS,
+}
+
+impl FromStr for HTTPMethod {
+    type Err = ();
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input.to_uppercase().as_str() {
+            "GET" => Ok(HTTPMethod::GET),
+            "POST" => Ok(HTTPMethod::POST),
+            "DELETE" => Ok(HTTPMethod::DELETE),
+            "HEAD" => Ok(HTTPMethod::HEAD),
+            "PUT" => Ok(HTTPMethod::PUT),
+            "PATCH" => Ok(HTTPMethod::PATCH),
+            "OPTIONS" => Ok(HTTPMethod::OPTIONS),
+            _ => Err(()),
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -60,44 +77,74 @@ struct Request {
     body: Option<String>,
 }
 
-fn read_request(mut stream: TcpStream) -> String {
-    let mut buffer = [0; 2048];
-    let bytes_read = match stream.read(&mut buffer) {
-        Ok(0) => todo!(),
-        Ok(n) => n,
-        Err(_) => {
-            eprintln!("Failed to read the stream bytes");
-            todo!()
-        }
-    };
-
-    let request_str = match std::str::from_utf8(&buffer[..bytes_read]) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error occurred while transforming to string {}", e);
-            todo!()
-        }
-    };
-
-    println!("{}", request_str);
-
-    "test".to_string()
+fn parse_request_line(raw: &str) -> Result<RequestLine, &'static str> {
+    let parts: Vec<&str> = raw.split_whitespace().collect();
+    if parts.len() != 3 {
+        return Err("Invalid request line");
+    }
+    let method = parts[0]
+        .parse::<HTTPMethod>()
+        .map_err(|_| "Unknown HTTP method")?;
+    Ok(RequestLine {
+        method,
+        request_uri: parts[1].to_string(),
+        http_version: parts[2].to_string(),
+    })
 }
 
-fn handle_request(mut stream: TcpStream) {
-    let request_json = read_request(stream);
-}
+fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
+    let mut buffer = [0u8; 4096];
+    let n = stream.read(&mut buffer)?;
+    let text = std::str::from_utf8(&buffer[..n])
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8"))?;
 
-fn main() {
-    let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
-    println!("Start of server");
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                println!("received request");
-                handle_request(stream)
-            }
-            Err(e) => eprintln!("connection failed: {}", e),
+    let mut lines = text.split("\r\n");
+    let raw_line = lines.next().unwrap_or("");
+    let request_line = parse_request_line(raw_line)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
+    let mut headers = HashMap::new();
+    for line in &mut lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            headers.insert(k.trim().to_string(), v.trim().to_string());
         }
     }
+
+    let body = lines.collect::<Vec<&str>>().join("\r\n");
+    let body = if body.is_empty() { None } else { Some(body) };
+
+    Ok(Request {
+        request_line,
+        headers,
+        body,
+    })
+}
+
+fn handle_request(mut stream: TcpStream) -> std::io::Result<()> {
+    let req = read_request(&mut stream)?;
+    println!("Parsed request: {:?}", req);
+    // TODO: Construct and write a Response to the stream here.
+    Ok(())
+}
+
+fn main() -> std::io::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:8080")?;
+    println!("Server listening on 127.0.0.1:8080");
+
+    for conn in listener.incoming() {
+        match conn {
+            Ok(stream) => {
+                println!("Received connection");
+                if let Err(e) = handle_request(stream) {
+                    eprintln!("Error handling request: {}", e);
+                }
+            }
+            Err(e) => eprintln!("Connection failed: {}", e),
+        }
+    }
+
+    Ok(())
 }
