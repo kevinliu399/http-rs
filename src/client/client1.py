@@ -16,3 +16,7 @@ data = {
 }
 
 response = requests.post(f"http://{URL}/", json=data)
+print("Response from server:")
+print(response.status_code)
+print(response.headers)
+print(response.text)
